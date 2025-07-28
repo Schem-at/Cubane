@@ -242,7 +242,7 @@ export class ModelResolver {
 
 	private matchesCondition(
 		block: Block,
-		condition: Record<string, string>
+		condition: Record<string, string | number>
 	): boolean {
 		for (const [property, value] of Object.entries(condition)) {
 			const blockValue = block.properties[property];
@@ -252,13 +252,17 @@ export class ModelResolver {
 				return false;
 			}
 
+			// Convert both values to strings for comparison
+			const valueStr = String(value);
+			const blockValueStr = String(blockValue);
+
 			// Check for OR value (pipe separated)
-			if (value.includes("|")) {
-				const values = value.split("|");
-				if (!values.includes(blockValue)) {
+			if (valueStr.includes("|")) {
+				const values = valueStr.split("|");
+				if (!values.includes(blockValueStr)) {
 					return false;
 				}
-			} else if (blockValue !== value) {
+			} else if (blockValueStr !== valueStr) {
 				// Simple equality check
 				return false;
 			}
