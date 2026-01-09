@@ -389,50 +389,11 @@ async function addBlock(blockString: string, position: THREE.Vector3) {
 			return null;
 		}
 
-		console.log(`=== Adding block: ${blockString} ===`);
-
-		// Debug: Log original material properties
-		originalMesh.traverse((child) => {
-			if (child instanceof THREE.Mesh && child.material) {
-				const materials = Array.isArray(child.material)
-					? child.material
-					: [child.material];
-				materials.forEach((mat, i) => {
-					console.log(`Original material ${i}:`, {
-						transparent: mat.transparent,
-						alphaTest: mat.alphaTest,
-						opacity: mat.opacity,
-						depthWrite: mat.depthWrite,
-						side: mat.side === THREE.DoubleSide ? "DoubleSide" : "FrontSide",
-					});
-				});
-			}
-		});
-
 		// Clone the mesh and materials to ensure independence from preview and other blocks
 		const mesh = originalMesh.clone();
 		cloneMeshMaterials(mesh);
 
-		console.log(`After cloning:`);
 
-		// Debug: Log cloned material properties
-		mesh.traverse((child) => {
-			if (child instanceof THREE.Mesh && child.material) {
-				const materials = Array.isArray(child.material)
-					? child.material
-					: [child.material];
-				materials.forEach((mat, i) => {
-					console.log(`Cloned material ${i}:`, {
-						transparent: mat.transparent,
-						alphaTest: mat.alphaTest,
-						opacity: mat.opacity,
-						depthWrite: mat.depthWrite,
-						side: mat.side === THREE.DoubleSide ? "DoubleSide" : "FrontSide",
-						isPreviewMaterial: mat.userData.isPreviewMaterial,
-					});
-				});
-			}
-		});
 
 		// Only restore preview-specific properties, keep PNG transparency intact
 		mesh.traverse((child) => {
@@ -464,25 +425,7 @@ async function addBlock(blockString: string, position: THREE.Vector3) {
 			}
 		});
 
-		console.log(`After restoration:`);
-
-		// Debug: Log final material properties
-		mesh.traverse((child) => {
-			if (child instanceof THREE.Mesh && child.material) {
-				const materials = Array.isArray(child.material)
-					? child.material
-					: [child.material];
-				materials.forEach((mat, i) => {
-					console.log(`Final material ${i}:`, {
-						transparent: mat.transparent,
-						alphaTest: mat.alphaTest,
-						opacity: mat.opacity,
-						depthWrite: mat.depthWrite,
-						side: mat.side === THREE.DoubleSide ? "DoubleSide" : "FrontSide",
-					});
-				});
-			}
-		});
+	
 
 		mesh.position.copy(position);
 

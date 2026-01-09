@@ -3,6 +3,7 @@ import JSZip from "jszip";
 import { AnimatedTextureManager } from "./AnimatedTextureManager";
 import { TintManager } from "./TintManager";
 import { BlockModel, BlockStateDefinition } from "./types";
+import { AtlasBuilder } from "./AtlasBuilder";
 
 export class AssetLoader {
 	private resourcePacks: Map<string, JSZip> = new Map();
@@ -19,10 +20,32 @@ export class AssetLoader {
 
 	// Texture loader
 	private textureLoader = new THREE.TextureLoader();
+	private textureAtlas: THREE.Texture | null = null;
+	private textureUVMap: Map<
+		string,
+		{ u: number; v: number; width: number; height: number }
+	> = new Map();
 
-	constructor() {
+	// Cache management
+	private resourcePackHash: string = "";
+	private cacheEnabled: boolean = true;
+
+	constructor(enableCache: boolean = true) {
 		this.animatedTextureManager = new AnimatedTextureManager(this);
 		this.tintManager = new TintManager();
+		this.cacheEnabled = enableCache;
+	}
+
+	/**
+	 * Calculate hash of resource pack for cache invalidation
+	 */
+	private async calculateResourcePackHash(
+		arrayBuffer: ArrayBuffer
+	): Promise<string> {
+		// Use SubtleCrypto to create a hash of the resource pack
+		const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
+		const hashArray = Array.from(new Uint8Array(hashBuffer));
+		return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 	}
 
 	/**
@@ -35,6 +58,17 @@ export class AssetLoader {
 			// Ensure fully loaded and safe Blob
 			const arrayBuffer = await blob.arrayBuffer();
 			console.log("📦 Blob size:", arrayBuffer.byteLength, "type:", blob.type);
+
+			// Calculate hash for caching
+			if (this.cacheEnabled) {
+				this.resourcePackHash = await this.calculateResourcePackHash(
+					arrayBuffer
+				);
+				console.log(
+					"🔑 Resource pack hash:",
+					this.resourcePackHash.substring(0, 16) + "..."
+				);
+			}
 
 			// Optional: Verify ZIP signature at start
 			const header = new Uint8Array(arrayBuffer.slice(0, 4));
@@ -438,7 +472,7 @@ export class AssetLoader {
 			const animatedTexture =
 				await this.animatedTextureManager.createAnimatedTexture(texturePath);
 			if (animatedTexture) {
-				`Successfully created animated texture for ${texturePath}`;
+				console.log(`Successfully created animated texture for ${texturePath}`);
 				this.textureCache.set(cacheKey, animatedTexture);
 				return animatedTexture;
 			} else {
@@ -526,8 +560,6 @@ export class AssetLoader {
 	): THREE.Color {
 		return this.tintManager.getTint(blockId, properties, biome, position);
 	}
-
-	// Add these methods to your AssetLoader class
 
 	/**
 	 * Analyze PNG texture transparency by examining alpha channel data
@@ -674,164 +706,449 @@ export class AssetLoader {
 		}
 	}
 
+	public getSharedAtlasTexture(): THREE.Texture | null {
+		return this.textureAtlas; // Return the single shared instance
+	}
 
-	// Replace the getMaterial method in AssetLoader with this simplified version
-public async getMaterial(
-    texturePath: string,
-    options: {
-        transparent?: boolean;
-        tint?: THREE.Color;
-        isLiquid?: boolean;
-        isWater?: boolean;
-        isLava?: boolean;
-        faceDirection?: string;
-        forceAnimation?: boolean;
-        alphaTest?: number;
-        opacity?: number;
-        biome?: string;
-    } = {}
-): Promise<THREE.Material> {
-    // Create cache key including all options
-    const tintKey = options.tint
-        ? `:tint:${options.tint.r.toFixed(3)},${options.tint.g.toFixed(3)},${options.tint.b.toFixed(3)}`
-        : "";
+	public async getMaterial(
+		texturePath: string,
+		options: {
+			transparent?: boolean;
+			tint?: THREE.Color;
+			isLiquid?: boolean;
+			isWater?: boolean;
+			isLava?: boolean;
+			faceDirection?: string;
+			forceAnimation?: boolean;
+			alphaTest?: number;
+			opacity?: number;
+			biome?: string;
+			useAtlas?: boolean;
+		} = {}
+	): Promise<THREE.Material> {
+		const useAtlas = options.useAtlas ?? true;
 
-    const liquidKey = options.isLiquid
-        ? `:liquid:${options.isWater ? "water" : "lava"}:${options.faceDirection || ""}`
-        : "";
+		// Create cache key
+		const cacheKey = `material:${texturePath}:${useAtlas ? "atlas" : "individual"
+			}:${JSON.stringify({
+				transparent: options.transparent,
+				isLiquid: options.isLiquid,
+				isWater: options.isWater,
+				isLava: options.isLava,
+				faceDirection: options.faceDirection,
+				alphaTest: options.alphaTest,
+				opacity: options.opacity,
+				tint: options.tint?.getHexString(),
+			})}`;
 
-    const cacheKey = `material:${texturePath}:${
-        options.transparent ? "transparent" : "opaque"
-    }${tintKey}${liquidKey}`;
+		// Return cached material (shared instance)
+		if (this.materialCache.has(cacheKey)) {
+			return this.materialCache.get(cacheKey)!;
+		}
 
-    // Check cache first
-    if (this.materialCache.has(cacheKey)) {
-        return this.materialCache.get(cacheKey)!;
-    }
+		// Handle special paths for liquids
+		let finalTexturePath = texturePath;
+		if (options.isWater) {
+			finalTexturePath =
+				options.faceDirection === "up"
+					? "block/water_still"
+					: "block/water_flow";
+		} else if (options.isLava) {
+			finalTexturePath =
+				options.faceDirection === "up" ? "block/lava_still" : "block/lava_flow";
+		}
 
-    // Handle special paths for liquids
-    let finalTexturePath = texturePath;
-    if (options.isWater) {
-        if (options.faceDirection === "up" || options.faceDirection === "down") {
-            finalTexturePath = "block/water_still";
-        } else {
-            finalTexturePath = "block/water_flow";
-        }
-    } else if (options.isLava) {
-        if (options.faceDirection === "up" || options.faceDirection === "down") {
-            finalTexturePath = "block/lava_still";
-        } else {
-            finalTexturePath = "block/lava_flow";
-        }
-    }
+		let texture: THREE.Texture;
+		let atlasUVData: {
+			u: number;
+			v: number;
+			width: number;
+			height: number;
+		} | null = null;
+		let usingAtlas = false;
 
-    // Load texture (animated or static)
-    let texture: THREE.Texture;
-    const shouldCheckAnimation =
-        options.isLiquid ||
-        options.forceAnimation ||
-        finalTexturePath.includes("water") ||
-        finalTexturePath.includes("lava");
+		// Check if this should use animation
+		const shouldCheckAnimation =
+			options.isLiquid ||
+			options.forceAnimation ||
+			finalTexturePath.includes("water") ||
+			finalTexturePath.includes("lava");
 
-    if (shouldCheckAnimation) {
-        const isAnimated = await this.animatedTextureManager.isAnimated(
-            `textures/${finalTexturePath}`
-        );
+		if (shouldCheckAnimation) {
+			// Use individual animated texture
+			const isAnimated = await this.animatedTextureManager.isAnimated(
+				`textures/${finalTexturePath}`
+			);
+			if (isAnimated) {
+				const animatedTexture =
+					await this.animatedTextureManager.createAnimatedTexture(
+						finalTexturePath
+					);
+				texture = animatedTexture || (await this.getTexture(finalTexturePath));
+			} else {
+				texture = await this.getTexture(finalTexturePath);
+			}
+			usingAtlas = false;
+		} else if (useAtlas && this.textureAtlas) {
+			// Use shared atlas texture
+			texture = this.getSharedAtlasTexture()!;
 
-        if (isAnimated) {
-            const animatedTexture = await this.animatedTextureManager.createAnimatedTexture(
-                finalTexturePath
-            );
-            texture = animatedTexture || (await this.getTexture(finalTexturePath));
-        } else {
-            texture = await this.getTexture(finalTexturePath);
-        }
-    } else {
-        texture = await this.getTexture(finalTexturePath);
-    }
+			// Get UV coordinates for this texture within the atlas
+			atlasUVData = this.getTextureUV(finalTexturePath);
 
-    // Simple approach: Let PNG alpha channels handle transparency naturally
-    const materialConfig: any = {
-        map: texture,
-        transparent: true,  // Always true - let PNG alpha do the work
-        alphaTest: 0.01,    // Very low threshold to discard nearly transparent pixels
-        depthWrite: true,   // Default to true, override for special cases
-        opacity: 1.0,       // Default to full opacity, let PNG alpha handle it
-        side: THREE.FrontSide
-    };
+			if (!atlasUVData) {
+				// Try variations
+				const variations = [
+					finalTexturePath.replace("minecraft:", ""),
+					`block/${finalTexturePath
+						.replace("minecraft:", "")
+						.replace("block/", "")}`,
+					texturePath.replace("minecraft:", ""),
+					`block/${texturePath
+						.replace("minecraft:", "")
+						.replace("block/", "")}`,
+					finalTexturePath.split("/").pop()
+						? `block/${finalTexturePath.split("/").pop()}`
+						: finalTexturePath,
+					texturePath.split("/").pop()
+						? `block/${texturePath.split("/").pop()}`
+						: texturePath,
+				];
 
-    // Special handling for specific material types
-    if (options.isWater) {
-        materialConfig.alphaTest = 0.0;      // Water uses blending, not cutout
-        materialConfig.depthWrite = false;   // Water needs proper blending
-        materialConfig.opacity = options.opacity || 0.8;
-    } else if (options.isLava) {
-        materialConfig.alphaTest = 0.0;      // Lava is usually opaque but might have edges
-        materialConfig.depthWrite = true;
-        materialConfig.opacity = 1.0;
-    } else if (finalTexturePath.includes('glass')) {
-        // Glass materials need blending, not cutout
-        materialConfig.alphaTest = 0.0;
-        materialConfig.depthWrite = false;
-        materialConfig.opacity = options.opacity || 0.85; // Slightly transparent for realistic glass
-    } else {
-        // For everything else, use a low alphaTest to handle cutout transparency
-        // This includes leaves, grass, redstone dust, torches, etc.
-        materialConfig.alphaTest = options.alphaTest || 0.01;
-        materialConfig.depthWrite = true;
-        materialConfig.opacity = options.opacity || 1.0;
-    }
+				for (const variation of variations) {
+					atlasUVData = this.getTextureUV(variation);
+					if (atlasUVData) break;
+				}
+			}
 
-    const material = new THREE.MeshStandardMaterial(materialConfig);
+			if (!atlasUVData) {
+				texture = await this.getTexture(finalTexturePath);
+				usingAtlas = false;
+			} else {
+				usingAtlas = true;
+			}
+		} else {
+			// Use individual texture
+			texture = await this.getTexture(finalTexturePath);
+			usingAtlas = false;
+		}
 
-    // Apply tint if provided
-    if (options.tint) {
-        material.color = options.tint;
-        material.defines = material.defines || {};
-        material.defines.USE_COLOR = "";
-    }
+		// Create material
+		const materialOptions: any = {
+			map: texture,
+			transparent: options.transparent ?? true,
+			alphaTest: options.alphaTest ?? 0.01,
+			side: THREE.FrontSide,
+		};
 
-    // Apply special properties for water
-    if (options.isWater) {
-        material.userData.isWater = true;
-        material.userData.faceDirection = options.faceDirection;
-        material.userData.renderToWaterPass = true;
+		if (options.opacity !== undefined) {
+			materialOptions.opacity = options.opacity;
+		}
 
-        // Add water-specific material properties
-        material.roughness = options.faceDirection === "up" ? 0.1 : 0.3;
-        material.metalness = options.faceDirection === "up" ? 0.05 : 0.0;
-    }
+		// Handle liquid-specific properties
+		if (options.isLiquid) {
+			materialOptions.transparent = true;
+			materialOptions.depthWrite = false;
+			materialOptions.side = THREE.FrontSide;
 
-    // Apply special properties for lava
-    if (options.isLava) {
-        material.emissive = new THREE.Color(0xff2200);
-        material.emissiveIntensity = 0.5;
-        material.roughness = 0.7;
-        material.metalness = 0.0;
+			if (options.isWater) {
+				materialOptions.opacity = 0.8;
+			} else if (options.isLava) {
+				materialOptions.opacity = 0.9;
+				materialOptions.emissive = new THREE.Color(0x331100);
+			}
+		}
 
-        material.userData.isLava = true;
-        material.userData.faceDirection = options.faceDirection;
-        material.userData.renderToLavaPass = true;
-        material.userData.lavaAnimationParams = {
-            pulseSpeed: 0.4,
-            pulseMin: 0.4,
-            pulseMax: 0.6,
-        };
-    }
+		const material = new THREE.MeshStandardMaterial(materialOptions);
 
-    // Store general liquid status
-    if (options.isLiquid) {
-        material.userData.isLiquid = true;
-    }
+		// Store atlas UV data in userData
+		if (usingAtlas && atlasUVData) {
+			material.userData.atlasUV = atlasUVData;
+			material.userData.useAtlas = true;
+			material.userData.texturePath = finalTexturePath;
+		} else {
+			material.userData.useAtlas = false;
+			material.userData.texturePath = finalTexturePath;
+		}
 
+		// Apply tinting
+		if (options.tint) {
+			if (usingAtlas) {
+				material.userData.tint = options.tint;
+			}
+			material.color = options.tint;
+		}
 
-    // Cache and return the material
-    this.materialCache.set(cacheKey, material);
-    
-    return material;
-}
+		// Liquid-specific userData
+		if (options.isWater) {
+			material.userData.isWater = true;
+			material.userData.faceDirection = options.faceDirection;
+			material.userData.renderToWaterPass = true;
+		}
 
-	// Add to your AssetLoader class
+		if (options.isLava) {
+			material.userData.isLava = true;
+			material.userData.faceDirection = options.faceDirection;
+			material.userData.renderToLavaPass = true;
+			material.userData.lavaAnimationParams = {
+				pulseSpeed: 0.4,
+				pulseMin: 0.4,
+				pulseMax: 0.6,
+			};
+		}
+
+		if (options.isLiquid) {
+			material.userData.isLiquid = true;
+		}
+
+		if (options.biome) {
+			material.userData.biome = options.biome;
+		}
+
+		// Cache and return the same instance (no cloning)
+		this.materialCache.set(cacheKey, material);
+		return material;
+	}
+
+	public async buildTextureAtlas(): Promise<THREE.Texture> {
+		if (this.textureAtlas) return this.textureAtlas;
+
+		// Try to load from cache first if caching is enabled
+		if (this.cacheEnabled && this.resourcePackHash) {
+			const atlasBuilder = new AtlasBuilder(2048, 1);
+
+			// Try cache with empty texture array first (just to check cache)
+			try {
+				const cacheResult = await atlasBuilder.buildAtlas(
+					[],
+					this.resourcePackHash
+				);
+				if (cacheResult.fromCache) {
+					console.log(
+						`🎯 Atlas loaded from cache with ${cacheResult.packingEfficiency.toFixed(
+							1
+						)}% efficiency`
+					);
+
+					// Create THREE.js texture from cached atlas
+					const atlasTexture = new THREE.CanvasTexture(cacheResult.atlas);
+					atlasTexture.minFilter = THREE.NearestFilter;
+					atlasTexture.magFilter = THREE.NearestFilter;
+					atlasTexture.wrapS = THREE.RepeatWrapping;
+					atlasTexture.wrapT = THREE.RepeatWrapping;
+					atlasTexture.needsUpdate = true;
+
+					// Store the atlas and UV mapping
+					this.textureAtlas = atlasTexture;
+					this.textureUVMap = cacheResult.uvMap;
+
+					console.log(
+						`📊 Loaded ${cacheResult.uvMap.size} textures from cache`
+					);
+					return atlasTexture;
+				}
+			} catch (error) {
+				console.log("📦 No cache found, building atlas...");
+			}
+		}
+
+		console.log("🚀 Building texture atlas...");
+
+		// Simple whitelist - just add paths you want to include
+		const allowedPaths = [
+			"block/",
+			// 'item/',      // Uncomment to include items
+			// 'entity/',    // Uncomment to include entities
+			// 'gui/',       // Uncomment to include GUI
+		];
+
+		// Collect whitelisted textures only
+		const allTextures = new Set<string>();
+		let totalFound = 0;
+
+		for (const packId of this.resourcePackOrder) {
+			const zip = this.resourcePacks.get(packId);
+			if (!zip) continue;
+
+			const files = Object.keys(zip.files).filter(
+				(path) =>
+					path.includes("assets/minecraft/textures/") &&
+					path.endsWith(".png") &&
+					!zip.files[path].dir
+			);
+
+			for (const file of files) {
+				const relativePath = file.replace("assets/minecraft/textures/", "");
+				const texturePath = relativePath.replace(".png", "");
+
+				totalFound++;
+
+				// Check if texture path starts with any allowed path
+				if (allowedPaths.some((allowed) => texturePath.startsWith(allowed))) {
+					allTextures.add(texturePath);
+				}
+			}
+		}
+
+		const texturePaths = Array.from(allTextures);
+		console.log(
+			`🖼️ Found ${totalFound} total textures, using ${texturePaths.length} whitelisted`
+		);
+
+		// Load textures with progress tracking
+		const textures: { path: string; image: HTMLImageElement }[] = [];
+		let loadedCount = 0;
+
+		for (const path of texturePaths) {
+			try {
+				const blob = await this.getResourceBlob(`textures/${path}.png`);
+				if (!blob) continue;
+
+				const url = URL.createObjectURL(blob);
+				const img = new Image();
+
+				await new Promise<void>((resolve, reject) => {
+					img.onload = () => resolve();
+					img.onerror = () => reject(new Error(`Failed to load ${path}`));
+					img.src = url;
+				});
+
+				textures.push({ path, image: img });
+				URL.revokeObjectURL(url);
+
+				loadedCount++;
+				if (loadedCount % 50 === 0) {
+					console.log(
+						`📈 Loaded ${loadedCount}/${texturePaths.length} textures`
+					);
+				}
+			} catch (e) {
+				console.warn(`⚠️ Failed to load texture ${path}:`, e);
+			}
+		}
+
+		// Build atlas using the AtlasBuilder with caching
+		const atlasBuilder = new AtlasBuilder(2048, 1);
+		const cacheKey = this.cacheEnabled ? this.resourcePackHash : undefined;
+
+		const { atlas, uvMap, packingEfficiency, fromCache } =
+			await atlasBuilder.buildAtlas(textures, cacheKey);
+
+		console.log(
+			`✅ Atlas built with ${packingEfficiency.toFixed(1)}% efficiency`
+		);
+		console.log(
+			`📊 Packed ${uvMap.size} textures into ${atlas.width}x${atlas.height} atlas`
+		);
+
+		// Create THREE.js texture
+		const atlasTexture = new THREE.CanvasTexture(atlas);
+		atlasTexture.minFilter = THREE.NearestFilter;
+		atlasTexture.magFilter = THREE.NearestFilter;
+		atlasTexture.wrapS = THREE.RepeatWrapping;
+		atlasTexture.wrapT = THREE.RepeatWrapping;
+		atlasTexture.needsUpdate = true;
+
+		// Store the atlas and UV mapping
+		this.textureAtlas = atlasTexture;
+		this.textureUVMap = uvMap;
+		return atlasTexture;
+	}
+
+	/**
+	 * Cache management methods
+	 */
+	public enableCache(): void {
+		this.cacheEnabled = true;
+		console.log("🔧 Atlas caching enabled");
+	}
+
+	public disableCache(): void {
+		this.cacheEnabled = false;
+		console.log("🔧 Atlas caching disabled");
+	}
+
+	public clearAtlasCache(): void {
+		AtlasBuilder.clearAllCaches();
+		console.log("🗑️ All atlas caches cleared");
+	}
+
+	public getCacheInfo(): {
+		key: string;
+		size: string;
+		age: string;
+		textureCount: number;
+	}[] {
+		return AtlasBuilder.getCacheInfo();
+	}
+
+	public invalidateCache(): void {
+		if (this.resourcePackHash) {
+			localStorage.removeItem(`atlas_${this.resourcePackHash}`);
+			console.log(`🔄 Cache invalidated for current resource pack`);
+		}
+	}
+
+	/**
+	 * Force rebuild atlas (ignores cache)
+	 */
+	public async rebuildTextureAtlas(): Promise<THREE.Texture> {
+		// Clear current atlas
+		this.textureAtlas = null;
+		this.textureUVMap.clear();
+
+		// Temporarily disable cache
+		const wasCacheEnabled = this.cacheEnabled;
+		this.cacheEnabled = false;
+
+		try {
+			const result = await this.buildTextureAtlas();
+			console.log("🔄 Atlas rebuilt from scratch");
+			return result;
+		} finally {
+			// Restore cache setting
+			this.cacheEnabled = wasCacheEnabled;
+		}
+	}
+
+	/**
+	 * List all blockstate files in the resource pack
+	 */
+	public async listBlockstates(): Promise<string[]> {
+		const blockstates: string[] = [];
+
+		for (const packId of this.resourcePackOrder) {
+			const zip = this.resourcePacks.get(packId);
+			if (!zip) continue;
+
+			const files = Object.keys(zip.files).filter(
+				(path) =>
+					path.includes("assets/minecraft/blockstates/") &&
+					path.endsWith(".json") &&
+					!zip.files[path].dir
+			);
+
+			for (const file of files) {
+				const blockId = file
+					.replace("assets/minecraft/blockstates/", "")
+					.replace(".json", "");
+				blockstates.push(`minecraft:${blockId}`);
+			}
+		}
+
+		return blockstates;
+	}
+
+	public getTextureAtlas(): THREE.Texture | null {
+		return this.textureAtlas;
+	}
+
+	public getTextureUV(
+		path: string
+	): { u: number; v: number; width: number; height: number } | null {
+		return this.textureUVMap.get(path) || null;
+	}
+
 	public async getEntityTexture(entityName: string): Promise<THREE.Texture> {
 		// Specialized texture paths for known entity types
 		let texturePaths: string[] = [];
@@ -863,7 +1180,7 @@ public async getMaterial(
 				if (texture) {
 					return texture;
 				}
-			} catch (error) {}
+			} catch (error) { }
 		}
 
 		// If we reach here, all paths failed
@@ -874,6 +1191,7 @@ public async getMaterial(
 		);
 		return this.createMissingTexture();
 	}
+
 	private createMissingTexture(): THREE.Texture {
 		// Create a purple/black checkerboard for missing textures
 		const size = 16;
@@ -935,5 +1253,10 @@ public async getMaterial(
 		// Clear resource packs
 		this.resourcePacks.clear();
 		this.resourcePackOrder = [];
+
+		// Reset cache hash
+		this.resourcePackHash = "";
+
+		console.log("AssetLoader disposed");
 	}
 }

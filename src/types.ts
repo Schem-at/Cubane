@@ -1,3 +1,5 @@
+import {Material, BufferGeometry} from "three";
+
 export interface ModelData {
 	model: string;
 	x?: number;
@@ -87,3 +89,72 @@ export interface ResourcePackLoadOptions {
  * Callback to get the resource pack blob if not found in cache
  */
 export type ResourcePackLoader = () => Promise<Blob>;
+
+export interface BlockOptimizationData {
+  isCube: boolean
+  hasTransparency: boolean
+  hasCullableFaces: boolean
+  
+  // Face organization
+  cullableFaces: Map<string, OptimizedFace[]>  // direction -> faces
+  nonCullableFaces: OptimizedFace[]
+  
+  // For batching
+  geometryTemplate?: GeometryTemplate
+}
+
+export interface OptimizedFace {
+  geometry: BufferGeometry
+  material: Material
+  direction: string // face normal direction
+  cullface?: string // the cullface value from model
+  elementBounds: [number[], number[]] // from/to in block space
+  canBatch: boolean
+}
+
+export interface GeometryTemplate {
+  positions: Float32Array
+  normals: Float32Array
+  uvs: Float32Array
+  indices: Uint32Array
+  materialGroups: MaterialGroup[]
+}
+
+export interface MaterialGroup {
+  material: Material
+  indexRange: { start: number, count: number }
+  cullface?: string
+}
+
+export interface BlockGeometryInfo {
+  isCube: boolean
+  hasTransparency: boolean
+  hasCullableFaces: boolean
+  isEntity: boolean
+  isHybrid: boolean
+}
+
+
+export interface TextureInfo {
+	path: string;
+	image: HTMLImageElement;
+	width: number;
+	height: number;
+	area: number;
+}
+
+export interface AtlasNode {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	used: boolean;
+	right?: AtlasNode;
+	down?: AtlasNode;
+}
+
+export interface PackedTexture extends TextureInfo {
+	x: number;
+	y: number;
+	rotated?: boolean;
+}

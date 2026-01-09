@@ -67,9 +67,9 @@ export class EntityRenderer {
 							}
 						});
 
-						const group = new THREE.Group();
-						model.position.set(0, -0.5, 0);
-						group.add(model);
+				const group = new THREE.Group();
+				model.position.set(0, -0.5, 0);
+				group.add(model);
 
 						this.modelCache.set(entityName, group);
 						resolve(group.clone());
