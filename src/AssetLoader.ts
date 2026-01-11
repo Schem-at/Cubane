@@ -4,12 +4,17 @@ import { AnimatedTextureManager } from "./AnimatedTextureManager";
 import { TintManager } from "./TintManager";
 import { BlockModel, BlockStateDefinition } from "./types";
 import { AtlasBuilder } from "./AtlasBuilder";
+import { ResourcePackManager } from "./ResourcePackManager";
 
 export class AssetLoader {
 	private resourcePacks: Map<string, JSZip> = new Map();
 	private resourcePackOrder: string[] = [];
 	private animatedTextureManager: AnimatedTextureManager;
 	private tintManager: TintManager;
+
+	// ResourcePackManager integration
+	private packManager: ResourcePackManager | null = null;
+	private usePackManager: boolean = false;
 
 	// Caches
 	private stringCache: Map<string, string> = new Map();
@@ -34,6 +39,83 @@ export class AssetLoader {
 		this.animatedTextureManager = new AnimatedTextureManager(this);
 		this.tintManager = new TintManager();
 		this.cacheEnabled = enableCache;
+	}
+
+	/**
+	 * Connect to a ResourcePackManager for managed pack loading
+	 */
+	public setPackManager(manager: ResourcePackManager): void {
+		this.packManager = manager;
+		this.usePackManager = true;
+
+		// Set up rebuild callback - when packs change, rebuild atlas
+		manager.setAtlasRebuildCallback(async () => {
+			await this.rebuildFromPackManager();
+		});
+	}
+
+	/**
+	 * Rebuild atlas from ResourcePackManager's packs
+	 */
+	private async rebuildFromPackManager(): Promise<void> {
+		if (!this.packManager) return;
+
+		// Clear caches that depend on pack content
+		this.stringCache.clear();
+		this.blockStateCache.clear();
+		this.modelCache.clear();
+
+		this.textureCache.forEach((t) => t.dispose());
+		this.textureCache.clear();
+
+		this.materialCache.forEach((m) => m.dispose());
+		this.materialCache.clear();
+
+		if (this.textureAtlas) {
+			this.textureAtlas.dispose();
+			this.textureAtlas = null;
+		}
+		this.textureUVMap.clear();
+
+		// Recalculate hash from enabled packs for cache key
+		const enabledPacks = this.packManager.getEnabledPacks();
+		const packHashes = enabledPacks.map((p) => p.hash);
+		this.resourcePackHash = await this.hashString(packHashes.join(":"));
+
+		// Rebuild atlas
+		await this.buildTextureAtlas();
+	}
+
+	/**
+	 * Hash a string using SHA-256
+	 */
+	private async hashString(str: string): Promise<string> {
+		const encoder = new TextEncoder();
+		const data = encoder.encode(str);
+		const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+		const hashArray = Array.from(new Uint8Array(hashBuffer));
+		return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+	}
+
+	/**
+	 * Get packs in priority order for iteration (highest priority first for overrides)
+	 * Supports both ResourcePackManager and legacy direct loading
+	 */
+	private getOrderedPacks(): Array<{ id: string; zip: JSZip }> {
+		// Try ResourcePackManager first if available and has packs
+		if (this.usePackManager && this.packManager) {
+			const packs = this.packManager.getEnabledPacksInOrder();
+			if (packs.length > 0) {
+				// Pack manager returns lowest-to-highest priority, reverse for iteration
+				return [...packs].reverse();
+			}
+			// Fall through to legacy if pack manager has no packs
+		}
+
+		// Legacy: use internal resourcePacks Map
+		return this.resourcePackOrder
+			.map((id) => ({ id, zip: this.resourcePacks.get(id)! }))
+			.filter((p) => p.zip);
 	}
 
 	/**
@@ -143,11 +225,8 @@ export class AssetLoader {
 			return this.stringCache.get(cacheKey);
 		}
 
-		// Try each resource pack in order of priority
-		for (const packId of this.resourcePackOrder) {
-			const zip = this.resourcePacks.get(packId);
-			if (!zip) continue;
-
+		// Try each resource pack in order of priority (highest first)
+		for (const { id: packId, zip } of this.getOrderedPacks()) {
 			const file = zip.file(`assets/minecraft/${path}`);
 			if (file) {
 				try {
@@ -172,11 +251,8 @@ export class AssetLoader {
 	 * Get a binary resource (textures, etc.)
 	 */
 	public async getResourceBlob(path: string): Promise<Blob | undefined> {
-		// Try each resource pack in order of priority
-		for (const packId of this.resourcePackOrder) {
-			const zip = this.resourcePacks.get(packId);
-			if (!zip) continue;
-
+		// Try each resource pack in order of priority (highest first)
+		for (const { id: packId, zip } of this.getOrderedPacks()) {
 			const file = zip.file(`assets/minecraft/${path}`);
 			if (file) {
 				try {
@@ -187,7 +263,7 @@ export class AssetLoader {
 			}
 		}
 
-		console.warn(`Resource not found: ${path}`);
+		// Silent fail - many textures won't exist in smaller packs
 		return undefined;
 	}
 
@@ -966,10 +1042,7 @@ export class AssetLoader {
 		const allTextures = new Set<string>();
 		let totalFound = 0;
 
-		for (const packId of this.resourcePackOrder) {
-			const zip = this.resourcePacks.get(packId);
-			if (!zip) continue;
-
+		for (const { zip } of this.getOrderedPacks()) {
 			const files = Object.keys(zip.files).filter(
 				(path) =>
 					path.includes("assets/minecraft/textures/") &&
@@ -1115,12 +1188,9 @@ export class AssetLoader {
 	 * List all blockstate files in the resource pack
 	 */
 	public async listBlockstates(): Promise<string[]> {
-		const blockstates: string[] = [];
+		const blockstatesSet = new Set<string>();
 
-		for (const packId of this.resourcePackOrder) {
-			const zip = this.resourcePacks.get(packId);
-			if (!zip) continue;
-
+		for (const { zip } of this.getOrderedPacks()) {
 			const files = Object.keys(zip.files).filter(
 				(path) =>
 					path.includes("assets/minecraft/blockstates/") &&
@@ -1132,11 +1202,11 @@ export class AssetLoader {
 				const blockId = file
 					.replace("assets/minecraft/blockstates/", "")
 					.replace(".json", "");
-				blockstates.push(`minecraft:${blockId}`);
+				blockstatesSet.add(`minecraft:${blockId}`);
 			}
 		}
 
-		return blockstates;
+		return Array.from(blockstatesSet);
 	}
 
 	public getTextureAtlas(): THREE.Texture | null {

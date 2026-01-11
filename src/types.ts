@@ -158,3 +158,178 @@ export interface PackedTexture extends TextureInfo {
 	y: number;
 	rotated?: boolean;
 }
+
+// ============================================
+// Resource Pack Management Types
+// ============================================
+
+/**
+ * Complete information about a loaded resource pack
+ */
+export interface ResourcePackInfo {
+	/** Unique identifier for this pack */
+	id: string;
+	/** Display name (from pack.mcmeta or filename) */
+	name: string;
+	/** Description from pack.mcmeta */
+	description: string;
+	/** pack_format from pack.mcmeta */
+	packFormat: number;
+	/** Base64 data URL of pack.png icon, or null if not present */
+	icon: string | null;
+	/** Priority order (higher = applied later, overrides lower) */
+	priority: number;
+	/** Whether this pack is currently enabled */
+	enabled: boolean;
+	/** Size in bytes */
+	size: number;
+	/** Asset counts */
+	assetCounts: {
+		textures: number;
+		blockstates: number;
+		models: number;
+	};
+	/** Original source URL if loaded from URL */
+	sourceUrl?: string;
+	/** Timestamp when pack was loaded */
+	loadedAt: number;
+	/** SHA-256 hash for change detection */
+	hash: string;
+}
+
+/**
+ * Options for fetching resource packs
+ */
+export interface PackFetchOptions {
+	/** Custom name override */
+	name?: string;
+	/** Initial priority (defaults to highest) */
+	priority?: number;
+	/** Progress callback */
+	onProgress?: (loaded: number, total: number) => void;
+	/** AbortSignal for cancellation */
+	signal?: AbortSignal;
+	/** Custom headers for fetch */
+	headers?: Record<string, string>;
+	/** Whether to enable the pack immediately (default: true) */
+	enabled?: boolean;
+	/** Whether to use cache (default: true) */
+	useCache?: boolean;
+}
+
+/**
+ * Result of pack validation
+ */
+export interface PackValidationResult {
+	valid: boolean;
+	packFormat?: number;
+	name?: string;
+	description?: string;
+	hasIcon: boolean;
+	errors: string[];
+	warnings: string[];
+	assetCounts: {
+		textures: number;
+		blockstates: number;
+		models: number;
+	};
+}
+
+/**
+ * Asset conflict information
+ */
+export interface AssetConflict {
+	/** Path to the asset */
+	assetPath: string;
+	/** Asset type */
+	type: 'texture' | 'blockstate' | 'model';
+	/** Packs that provide this asset, in priority order (highest first) */
+	providers: Array<{
+		packId: string;
+		packName: string;
+		priority: number;
+	}>;
+	/** Which pack is actually being used */
+	activeProvider: string;
+}
+
+/**
+ * List of assets in a pack
+ */
+export interface PackAssetList {
+	textures: string[];
+	blockstates: string[];
+	models: string[];
+}
+
+/**
+ * Cache information for a pack
+ */
+export interface PackCacheInfo {
+	packId: string;
+	cached: boolean;
+	size: number;
+	cachedAt?: number;
+	expiresAt?: number;
+}
+
+/**
+ * Memory usage statistics
+ */
+export interface MemoryStats {
+	totalPacksSize: number;
+	loadedPacksCount: number;
+	atlasSize: number;
+	cachedMaterials: number;
+	cachedTextures: number;
+	cachedMeshes: number;
+}
+
+/**
+ * Resource pack configuration for export/import
+ */
+export interface PackConfiguration {
+	version: number;
+	packs: Array<{
+		id: string;
+		name: string;
+		sourceUrl?: string;
+		priority: number;
+		enabled: boolean;
+	}>;
+}
+
+// ============================================
+// Resource Pack Events
+// ============================================
+
+export type PackEventType =
+	| 'packAdded'
+	| 'packRemoved'
+	| 'packToggled'
+	| 'packOrderChanged'
+	| 'packsChanged'
+	| 'atlasRebuilding'
+	| 'atlasRebuilt'
+	| 'loadProgress'
+	| 'loadStart'
+	| 'loadComplete'
+	| 'loadError'
+	| 'error';
+
+export interface PackEventMap {
+	packAdded: { packId: string; info: ResourcePackInfo };
+	packRemoved: { packId: string; name: string };
+	packToggled: { packId: string; enabled: boolean };
+	packOrderChanged: { packIds: string[] };
+	packsChanged: { reason: string };
+	atlasRebuilding: { textureCount: number };
+	atlasRebuilt: { textureCount: number; efficiency: number; fromCache: boolean };
+	loadProgress: { packId: string; loaded: number; total: number; percent: number };
+	loadStart: { packId: string; source: 'url' | 'blob' | 'file' | 'cache' };
+	loadComplete: { packId: string; info: ResourcePackInfo };
+	loadError: { packId: string | null; error: Error; source?: string };
+	error: { error: Error; context?: string };
+}
+
+export type PackEventCallback<T extends PackEventType> = (event: PackEventMap[T]) => void;

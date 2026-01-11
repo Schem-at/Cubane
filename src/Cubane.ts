@@ -9,9 +9,18 @@ import {
 	ModelData,
 	ResourcePackLoader,
 	ResourcePackLoadOptions,
+	ResourcePackInfo,
+	PackFetchOptions,
+	PackEventType,
+	PackEventCallback,
+	AssetConflict,
+	PackAssetList,
+	PackConfiguration,
+	MemoryStats,
 } from "./types";
 import { ModelResolver } from "./ModelResolver";
 import { BlockMeshBuilder } from "./BlockMeshBuilder";
+import { ResourcePackManager } from "./ResourcePackManager";
 
 // Define a type for dynamic parts of hybrid blocks
 export interface HybridBlockDynamicPart {
@@ -35,6 +44,9 @@ export class Cubane {
 	private db: IDBDatabase | null = null;
 	private dbName: string = "cubane-cache";
 	private dbVersion: number = 1;
+
+	// Resource Pack Manager - new unified pack management
+	private packManager: ResourcePackManager;
 
 	// Mesh caching
 	private blockMeshCache: Map<string, THREE.Object3D> = new Map();
@@ -126,6 +138,15 @@ export class Cubane {
 		this.modelResolver = new ModelResolver(this.assetLoader);
 		this.blockMeshBuilder = new BlockMeshBuilder(this.assetLoader);
 		this.entityRenderer = new EntityRenderer(); // Make sure EntityRenderer can load "lectern_book", "bell_body"
+		
+		// Initialize ResourcePackManager
+		this.packManager = new ResourcePackManager();
+		this.assetLoader.setPackManager(this.packManager);
+		
+		// Set up mesh rebuild callback
+		this.packManager.setMeshRebuildCallback(() => {
+			this.clearMeshCaches();
+		});
 
 		this.initPromise = Promise.resolve().then(() => {
 			this.initialized = true;
@@ -403,7 +424,295 @@ export class Cubane {
 			return false;
 		}
 	}
-	// --- End Database and Resource Pack methods ---
+	// --- End Legacy Database and Resource Pack methods ---
+
+	// ============================================
+	// NEW: Resource Pack Manager API
+	// ============================================
+
+	/**
+	 * Get the ResourcePackManager instance for direct access
+	 */
+	public get packs(): ResourcePackManager {
+		return this.packManager;
+	}
+
+	// --- Fetching & Loading ---
+
+	/**
+	 * Load a resource pack from a URL
+	 */
+	public async loadPackFromUrl(url: string, options?: PackFetchOptions): Promise<string> {
+		return this.packManager.loadPackFromUrl(url, options);
+	}
+
+	/**
+	 * Load a resource pack from a Blob
+	 */
+	public async loadPackFromBlob(blob: Blob, name?: string): Promise<string> {
+		return this.packManager.loadPackFromBlob(blob, name);
+	}
+
+	/**
+	 * Load a resource pack from a File (drag-drop, file input)
+	 */
+	public async loadPackFromFile(file: File): Promise<string> {
+		return this.packManager.loadPackFromFile(file);
+	}
+
+	// --- Pack Management ---
+
+	/**
+	 * Remove a resource pack
+	 */
+	public async removePack(packId: string): Promise<void> {
+		return this.packManager.removePack(packId);
+	}
+
+	/**
+	 * Remove all resource packs
+	 */
+	public async removeAllPacks(): Promise<void> {
+		return this.packManager.removeAllPacks();
+	}
+
+	/**
+	 * Enable a resource pack
+	 */
+	public async enablePack(packId: string): Promise<void> {
+		return this.packManager.enablePack(packId);
+	}
+
+	/**
+	 * Disable a resource pack
+	 */
+	public async disablePack(packId: string): Promise<void> {
+		return this.packManager.disablePack(packId);
+	}
+
+	/**
+	 * Toggle a resource pack's enabled state
+	 */
+	public async togglePack(packId: string): Promise<boolean> {
+		return this.packManager.togglePack(packId);
+	}
+
+	/**
+	 * Set a pack's priority
+	 */
+	public async setPackPriority(packId: string, priority: number): Promise<void> {
+		return this.packManager.setPackPriority(packId, priority);
+	}
+
+	/**
+	 * Move a pack up in priority
+	 */
+	public async movePackUp(packId: string): Promise<void> {
+		return this.packManager.movePackUp(packId);
+	}
+
+	/**
+	 * Move a pack down in priority
+	 */
+	public async movePackDown(packId: string): Promise<void> {
+		return this.packManager.movePackDown(packId);
+	}
+
+	/**
+	 * Reorder packs (for drag-drop UI)
+	 */
+	public async reorderPacks(packIds: string[]): Promise<void> {
+		return this.packManager.reorderPacks(packIds);
+	}
+
+	// --- Querying ---
+
+	/**
+	 * Get info for a specific pack
+	 */
+	public getPackInfo(packId: string): ResourcePackInfo | null {
+		return this.packManager.getPack(packId);
+	}
+
+	/**
+	 * Get all packs sorted by priority
+	 */
+	public getAllPacks(): ResourcePackInfo[] {
+		return this.packManager.getAllPacks();
+	}
+
+	/**
+	 * Get only enabled packs
+	 */
+	public getEnabledPacks(): ResourcePackInfo[] {
+		return this.packManager.getEnabledPacks();
+	}
+
+	/**
+	 * Get pack count
+	 */
+	public getPackCount(): number {
+		return this.packManager.getPackCount();
+	}
+
+	/**
+	 * Get assets provided by a specific pack
+	 */
+	public async getPackAssets(packId: string): Promise<PackAssetList> {
+		return this.packManager.getPackAssets(packId);
+	}
+
+	/**
+	 * Get which pack provides a specific asset
+	 */
+	public getAssetSource(assetPath: string, type: 'texture' | 'blockstate' | 'model'): string | null {
+		return this.packManager.getAssetSource(assetPath, type);
+	}
+
+	/**
+	 * Get all asset conflicts
+	 */
+	public async getAssetConflicts(): Promise<AssetConflict[]> {
+		return this.packManager.getAssetConflicts();
+	}
+
+	/**
+	 * Preview a texture from a specific pack
+	 */
+	public async previewPackTexture(packId: string, texturePath: string): Promise<string | null> {
+		return this.packManager.previewTexture(packId, texturePath);
+	}
+
+	// --- Events ---
+
+	/**
+	 * Subscribe to pack events
+	 */
+	public onPackEvent<T extends PackEventType>(event: T, callback: PackEventCallback<T>): void {
+		this.packManager.on(event, callback);
+	}
+
+	/**
+	 * Unsubscribe from pack events
+	 */
+	public offPackEvent<T extends PackEventType>(event: T, callback: PackEventCallback<T>): void {
+		this.packManager.off(event, callback);
+	}
+
+	/**
+	 * Subscribe to pack event once
+	 */
+	public oncePackEvent<T extends PackEventType>(event: T, callback: PackEventCallback<T>): void {
+		this.packManager.once(event, callback);
+	}
+
+	// --- Batch Operations ---
+
+	/**
+	 * Begin a batch update (pauses auto-rebuild)
+	 */
+	public beginPackBatchUpdate(): void {
+		this.packManager.beginBatchUpdate();
+	}
+
+	/**
+	 * End a batch update (commits changes, triggers rebuild)
+	 */
+	public async endPackBatchUpdate(): Promise<void> {
+		return this.packManager.endBatchUpdate();
+	}
+
+	/**
+	 * Set auto-rebuild mode
+	 */
+	public setPackAutoRebuild(enabled: boolean): void {
+		this.packManager.setAutoRebuild(enabled);
+	}
+
+	/**
+	 * Manually trigger atlas rebuild
+	 */
+	public async rebuildPackAtlas(): Promise<void> {
+		return this.packManager.rebuildAtlas();
+	}
+
+	// --- Persistence ---
+
+	/**
+	 * Save pack state to IndexedDB
+	 */
+	public async savePackState(): Promise<void> {
+		return this.packManager.saveState();
+	}
+
+	/**
+	 * Load pack state from IndexedDB
+	 */
+	public async loadPackState(): Promise<boolean> {
+		return this.packManager.loadState();
+	}
+
+	/**
+	 * Export pack configuration
+	 */
+	public exportPackConfig(): PackConfiguration {
+		return this.packManager.exportConfig();
+	}
+
+	/**
+	 * Import pack configuration
+	 */
+	public async importPackConfig(config: PackConfiguration): Promise<void> {
+		return this.packManager.importConfig(config);
+	}
+
+	// --- Cache Management ---
+
+	/**
+	 * Get total pack cache size
+	 */
+	public async getPackCacheSize(): Promise<number> {
+		return this.packManager.getCacheSize();
+	}
+
+	/**
+	 * Clear all pack cache
+	 */
+	public async clearPackCache(): Promise<void> {
+		return this.packManager.clearAllCache();
+	}
+
+	/**
+	 * Check if a pack URL is cached
+	 */
+	public async isPackCached(sourceUrl: string): Promise<boolean> {
+		return this.packManager.isPackCached(sourceUrl);
+	}
+
+	// --- Memory & Stats ---
+
+	/**
+	 * Get memory usage statistics
+	 */
+	public getPackMemoryUsage(): MemoryStats {
+		const stats = this.packManager.getMemoryUsage();
+		// Add additional stats from AssetLoader
+		stats.cachedMeshes = this.blockMeshCache.size + this.entityMeshCache.size;
+		return stats;
+	}
+
+	// --- Validation ---
+
+	/**
+	 * Validate a pack without loading it
+	 */
+	public async validatePack(blob: Blob) {
+		return this.packManager.validatePack(blob);
+	}
+
+	// ============================================
+	// END: Resource Pack Manager API
+	// ============================================
 
 	public lastPackLoadedFromCache: boolean = false;
 
