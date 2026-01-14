@@ -1,6 +1,6 @@
 {
 	"name": "cubane",
-	"version": "1.0.18",
+	"version": "1.0.19",
 	"description": "A Three.js-based Minecraft block and entity renderer with resource pack support",
 	"type": "module",
 	"main": "dist/cubane.umd.js",
@@ -39,11 +39,11 @@
 	"license": "AGPL-3.0-or-later",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/Nano112/cubane.git"
+		"url": "git+https://github.com/Schem-at/Cubane.git"
 	},
-	"homepage": "https://github.com/Nano112/cubane",
+	"homepage": "https://github.com/Schem-at/Cubane",
 	"bugs": {
-		"url": "https://github.com/Nano112/cubane/issues"
+		"url": "https://github.com/Schem-at/Cubane/issues"
 	},
 	"dependencies": {
 		"jszip": "^3.10.1"
