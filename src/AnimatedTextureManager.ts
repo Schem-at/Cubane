@@ -98,6 +98,11 @@ export class AnimatedTextureManager {
                 texture.wrapS = THREE.RepeatWrapping;
                 texture.wrapT = THREE.RepeatWrapping;
 
+                // Ensure animation property exists (some mcmeta files may have different structure)
+                if (!metadata.animation) {
+                    metadata.animation = {};
+                }
+
                 // Set up animation parameters
                 const frameTime = metadata.animation.frametime || 1;
                 // Ensure frames are set for later use in the update method

@@ -183,6 +183,14 @@ export class ResourcePackManager {
 		
 		const packId = this.generatePackId();
 		
+		// Check if pack with this URL is already loaded (skip re-fetching)
+		for (const [existingId, pack] of this.packs) {
+			if (pack.info.sourceUrl === url) {
+				console.log(`[ResourcePackManager] Pack from ${url} already loaded (id: ${existingId})`);
+				return existingId;
+			}
+		}
+
 		this.emit('loadStart', { packId, source: 'url' });
 
 		try {

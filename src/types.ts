@@ -137,7 +137,7 @@ export interface BlockGeometryInfo {
 
 export interface TextureInfo {
 	path: string;
-	image: HTMLImageElement;
+	image: HTMLImageElement | ImageBitmap;
 	width: number;
 	height: number;
 	area: number;

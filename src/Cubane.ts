@@ -133,7 +133,7 @@ export class Cubane {
 		// Add other hybrid blocks here
 	};
 
-	constructor() {
+	constructor(options?: { autoRestore?: boolean }) {
 		this.assetLoader = new AssetLoader();
 		this.modelResolver = new ModelResolver(this.assetLoader);
 		this.blockMeshBuilder = new BlockMeshBuilder(this.assetLoader);
@@ -148,9 +148,37 @@ export class Cubane {
 			this.clearMeshCaches();
 		});
 
-		this.initPromise = Promise.resolve().then(() => {
-			this.initialized = true;
+		const autoRestore = options?.autoRestore ?? true;
+		const packManager = this.packManager; // Capture for async closure
+
+		// Auto-save state when packs change
+		packManager.on('packAdded', () => {
+			// Save state in background after pack is added
+			packManager.saveState().catch(err => {
+				console.warn('[Cubane] Failed to auto-save state:', err);
+			});
 		});
+		packManager.on('packRemoved', () => {
+			packManager.saveState().catch(err => {
+				console.warn('[Cubane] Failed to auto-save state:', err);
+			});
+		});
+
+		this.initPromise = (async () => {
+			// Try to auto-restore previous session's packs and atlas
+			if (autoRestore) {
+				try {
+					const restored = await packManager.loadState();
+					if (restored) {
+						console.log('[Cubane] Auto-restored resource packs from cache');
+						this.lastPackLoadedFromCache = true;
+					}
+				} catch (error) {
+					console.warn('[Cubane] Failed to auto-restore state:', error);
+				}
+			}
+			this.initialized = true;
+		})();
 
 		// Register shulker box entities
 		const shulkerBoxEntityMap = this.getShulkerBoxEntityMap();
@@ -282,13 +310,16 @@ export class Cubane {
 		loader?: ResourcePackLoader
 	): Promise<void> {
 		if (!this.initialized) await this.initPromise;
+		
+		// Route through ResourcePackManager for proper caching and deduplication
 		if (options instanceof Blob) {
-			await this.assetLoader.loadResourcePack(options);
-			this.lastPackLoadedFromCache = false; // Not from cache
-			// Clear mesh caches when new resource pack is loaded
-			this.clearMeshCaches();
+			// Check if this blob's hash is already loaded (deduplication happens in packManager)
+			await this.packManager.loadPackFromBlob(options);
+			this.lastPackLoadedFromCache = false;
 			return;
 		}
+		
+		// Legacy options-based loading with loader function
 		const defaultOptions: ResourcePackLoadOptions = {
 			packId: `pack_${Date.now()}`,
 			useCache: true,
@@ -296,8 +327,11 @@ export class Cubane {
 			cacheExpiration: 7 * 24 * 60 * 60 * 1000,
 		};
 		const finalOptions = { ...defaultOptions, ...options };
+		
+		// Use loader function to get blob
 		let resourcePackBlob: Blob | null = null;
 		this.lastPackLoadedFromCache = false;
+		
 		if (finalOptions.useCache && !finalOptions.forceReload) {
 			try {
 				resourcePackBlob = await this.getResourcePackFromCache(
@@ -309,28 +343,26 @@ export class Cubane {
 				console.warn("Cubane: Error accessing cache:", error);
 			}
 		}
+		
 		if (!resourcePackBlob) {
 			if (!loader) throw new Error("No loader and pack not in cache");
 			resourcePackBlob = await loader();
 			if (finalOptions.useCache && resourcePackBlob) {
-				// Ensure blob is not null
 				try {
 					await this.storeResourcePack(finalOptions.packId!, resourcePackBlob);
 					if (finalOptions.cacheExpiration)
-						await this.cleanupExpiredResourcePacks(
-							finalOptions.cacheExpiration
-						);
+						await this.cleanupExpiredResourcePacks(finalOptions.cacheExpiration);
 				} catch (storeError) {
 					console.warn("Cubane: Failed to cache resource pack:", storeError);
 				}
 			}
 		}
+		
 		if (!resourcePackBlob)
 			throw new Error("Failed to load or retrieve resource pack blob");
-		await this.assetLoader.loadResourcePack(resourcePackBlob);
-		await this.assetLoader.buildTextureAtlas(); // Ensure textures are ready
-		// Clear mesh caches when new resource pack is loaded
-		this.clearMeshCaches();
+		
+		// Route through packManager for deduplication
+		await this.packManager.loadPackFromBlob(resourcePackBlob, finalOptions.packId);
 	}
 	public async listCachedResourcePacks(): Promise<
 		Array<{ id: string; name: string; size: number; timestamp: number }>

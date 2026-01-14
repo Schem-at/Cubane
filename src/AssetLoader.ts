@@ -1029,6 +1029,7 @@ export class AssetLoader {
 		}
 
 		console.log("🚀 Building texture atlas...");
+		const startTime = performance.now();
 
 		// Simple whitelist - just add paths you want to include
 		const allowedPaths = [
@@ -1068,37 +1069,48 @@ export class AssetLoader {
 			`🖼️ Found ${totalFound} total textures, using ${texturePaths.length} whitelisted`
 		);
 
-		// Load textures with progress tracking
-		const textures: { path: string; image: HTMLImageElement }[] = [];
+		// OPTIMIZED: Parallel texture loading with batching and ImageBitmap
+		const textures: { path: string; image: ImageBitmap }[] = [];
+		const BATCH_SIZE = 50; // Load 50 textures concurrently
 		let loadedCount = 0;
 
-		for (const path of texturePaths) {
-			try {
-				const blob = await this.getResourceBlob(`textures/${path}.png`);
-				if (!blob) continue;
+		// Process textures in parallel batches
+		for (let i = 0; i < texturePaths.length; i += BATCH_SIZE) {
+			const batch = texturePaths.slice(i, i + BATCH_SIZE);
+			
+			const batchResults = await Promise.all(
+				batch.map(async (path) => {
+					try {
+						const blob = await this.getResourceBlob(`textures/${path}.png`);
+						if (!blob) return null;
 
-				const url = URL.createObjectURL(blob);
-				const img = new Image();
+						// Use createImageBitmap for faster decoding (off main thread)
+						const imageBitmap = await createImageBitmap(blob);
+						return { path, image: imageBitmap };
+					} catch (e) {
+						// Silent fail for missing textures
+						return null;
+					}
+				})
+			);
 
-				await new Promise<void>((resolve, reject) => {
-					img.onload = () => resolve();
-					img.onerror = () => reject(new Error(`Failed to load ${path}`));
-					img.src = url;
-				});
-
-				textures.push({ path, image: img });
-				URL.revokeObjectURL(url);
-
-				loadedCount++;
-				if (loadedCount % 50 === 0) {
-					console.log(
-						`📈 Loaded ${loadedCount}/${texturePaths.length} textures`
-					);
+			// Filter out nulls and add to textures
+			for (const result of batchResults) {
+				if (result) {
+					textures.push(result);
+					loadedCount++;
 				}
-			} catch (e) {
-				console.warn(`⚠️ Failed to load texture ${path}:`, e);
+			}
+
+			if (loadedCount > 0 && (i + BATCH_SIZE) % 200 === 0) {
+				console.log(
+					`📈 Loaded ${loadedCount}/${texturePaths.length} textures`
+				);
 			}
 		}
+
+		const loadTime = performance.now() - startTime;
+		console.log(`⚡ Loaded ${textures.length} textures in ${loadTime.toFixed(0)}ms`);
 
 		// Build atlas using the AtlasBuilder with caching
 		const atlasBuilder = new AtlasBuilder(2048, 1);
@@ -1141,17 +1153,18 @@ export class AssetLoader {
 		console.log("🔧 Atlas caching disabled");
 	}
 
-	public clearAtlasCache(): void {
-		AtlasBuilder.clearAllCaches();
+	public async clearAtlasCache(): Promise<void> {
+		await AtlasBuilder.clearAllCaches();
 		console.log("🗑️ All atlas caches cleared");
 	}
 
-	public getCacheInfo(): {
+	public async getCacheInfo(): Promise<{
 		key: string;
 		size: string;
 		age: string;
 		textureCount: number;
-	}[] {
+		storage: string;
+	}[]> {
 		return AtlasBuilder.getCacheInfo();
 	}
 

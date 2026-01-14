@@ -1,6 +1,47 @@
 import * as THREE from 'three';
 import { TextureInfo, PackedTexture, AtlasNode } from './types';
 
+// IndexedDB-based atlas cache for better performance
+const ATLAS_CACHE_DB_NAME = 'cubane-atlas-cache';
+const ATLAS_CACHE_STORE_NAME = 'atlases';
+const ATLAS_CACHE_VERSION = 1;
+
+let atlasCacheDb: IDBDatabase | null = null;
+
+async function openAtlasCacheDb(): Promise<IDBDatabase> {
+	if (atlasCacheDb) return atlasCacheDb;
+	
+	return new Promise((resolve, reject) => {
+		const request = indexedDB.open(ATLAS_CACHE_DB_NAME, ATLAS_CACHE_VERSION);
+		
+		request.onerror = () => reject(request.error);
+		request.onsuccess = () => {
+			atlasCacheDb = request.result;
+			resolve(atlasCacheDb);
+		};
+		
+		request.onupgradeneeded = (event) => {
+			const db = (event.target as IDBOpenDBRequest).result;
+			if (!db.objectStoreNames.contains(ATLAS_CACHE_STORE_NAME)) {
+				db.createObjectStore(ATLAS_CACHE_STORE_NAME, { keyPath: 'cacheKey' });
+			}
+		};
+	});
+}
+
+export interface AtlasCacheData {
+	cacheKey: string;
+	// Store raw ImageData instead of base64 PNG for speed
+	imageData: Uint8ClampedArray;
+	width: number;
+	height: number;
+	uvMap: Record<string, { u: number; v: number; width: number; height: number }>;
+	packingEfficiency: number;
+	timestamp: number;
+	textureCount: number;
+}
+
+// Legacy localStorage cache interface (for migration)
 export interface AtlasCache {
 	atlasImageData: string; // Base64 encoded image data
 	uvMap: Record<string, { u: number; v: number; width: number; height: number }>;
@@ -23,7 +64,7 @@ export class AtlasBuilder {
 	 * Build texture atlas with caching support
 	 */
 	public async buildAtlas(
-		textures: { path: string; image: HTMLImageElement }[],
+		textures: { path: string; image: HTMLImageElement | ImageBitmap }[],
 		cacheKey?: string
 	): Promise<{
 		atlas: HTMLCanvasElement;
@@ -50,17 +91,20 @@ export class AtlasBuilder {
 		// Build new atlas
 		const result = await this.buildNewAtlas(textures);
 		
-		// Save to cache if cache key provided
+		// Save to cache if cache key provided (don't await - do it in background)
 		if (cacheKey) {
-			await this.saveToCache(cacheKey, result, textures.length);
-			console.log(`💾 Saved atlas to cache`);
+			this.saveToCache(cacheKey, result, textures.length).then(() => {
+				console.log(`💾 Saved atlas to cache`);
+			}).catch(err => {
+				console.warn(`⚠️ Failed to save atlas to cache:`, err);
+			});
 		}
 
 		return { ...result, fromCache: false };
 	}
 
 	/**
-	 * Try to load atlas from cache
+	 * Try to load atlas from IndexedDB cache (fast path)
 	 */
 	private async loadFromCache(
 		cacheKey: string, 
@@ -70,27 +114,109 @@ export class AtlasBuilder {
 		uvMap: Map<string, { u: number; v: number; width: number; height: number }>;
 		packingEfficiency: number;
 	} | null> {
+		const startTime = performance.now();
+		
+		try {
+			// Try IndexedDB first (fast path)
+			const db = await openAtlasCacheDb();
+			const cacheData = await new Promise<AtlasCacheData | null>((resolve) => {
+				const transaction = db.transaction(ATLAS_CACHE_STORE_NAME, 'readonly');
+				const store = transaction.objectStore(ATLAS_CACHE_STORE_NAME);
+				const request = store.get(cacheKey);
+				
+				request.onsuccess = () => resolve(request.result || null);
+				request.onerror = () => resolve(null);
+			});
+
+			if (cacheData) {
+				// Validate cache
+				if (expectedTextureCount > 0 && cacheData.textureCount !== expectedTextureCount) {
+					console.log(`⚠️ Cache texture count mismatch: expected ${expectedTextureCount}, got ${cacheData.textureCount}`);
+					return null;
+				}
+
+				// Check if cache is too old (1 week)
+				const maxAge = 7 * 24 * 60 * 60 * 1000;
+				if (Date.now() - cacheData.timestamp > maxAge) {
+					console.log(`⚠️ Cache expired`);
+					await this.deleteFromCache(cacheKey);
+					return null;
+				}
+
+				// Fast reconstruction from raw ImageData
+				const canvas = document.createElement('canvas');
+				canvas.width = cacheData.width;
+				canvas.height = cacheData.height;
+				const ctx = canvas.getContext('2d')!;
+				
+				const imageData = new ImageData(
+					new Uint8ClampedArray(cacheData.imageData),
+					cacheData.width,
+					cacheData.height
+				);
+				ctx.putImageData(imageData, 0, 0);
+
+				// Reconstruct UV map
+				const uvMap = new Map<string, { u: number; v: number; width: number; height: number }>();
+				Object.entries(cacheData.uvMap).forEach(([path, uv]) => {
+					uvMap.set(path, uv);
+				});
+
+				const loadTime = performance.now() - startTime;
+				console.log(`📊 IndexedDB cache hit: ${uvMap.size} textures, ${cacheData.packingEfficiency.toFixed(1)}% efficiency (${loadTime.toFixed(0)}ms)`);
+
+				return {
+					atlas: canvas,
+					uvMap,
+					packingEfficiency: cacheData.packingEfficiency
+				};
+			}
+
+			// Fallback: try localStorage (legacy cache migration)
+			const legacyResult = await this.loadFromLocalStorage(cacheKey, expectedTextureCount);
+			if (legacyResult) {
+				// Migrate to IndexedDB in background
+				this.migrateToIndexedDB(cacheKey, legacyResult).catch(() => {});
+				return legacyResult;
+			}
+
+			return null;
+
+		} catch (error) {
+			console.warn(`⚠️ Failed to load from cache:`, error);
+			return null;
+		}
+	}
+
+	/**
+	 * Legacy localStorage loader (for migration)
+	 */
+	private async loadFromLocalStorage(
+		cacheKey: string,
+		expectedTextureCount: number
+	): Promise<{
+		atlas: HTMLCanvasElement;
+		uvMap: Map<string, { u: number; v: number; width: number; height: number }>;
+		packingEfficiency: number;
+		textureCount: number;
+	} | null> {
 		try {
 			const cached = localStorage.getItem(`atlas_${cacheKey}`);
 			if (!cached) return null;
 
 			const cacheData: AtlasCache = JSON.parse(cached);
 			
-			// Validate cache - only check texture count if we actually have textures to compare
 			if (expectedTextureCount > 0 && cacheData.textureCount !== expectedTextureCount) {
-				console.log(`⚠️ Cache texture count mismatch: expected ${expectedTextureCount}, got ${cacheData.textureCount}`);
 				return null;
 			}
 
-			// Check if cache is too old (1 week)
-			const maxAge = 7 * 24 * 60 * 60 * 1000; // 1 week in ms
+			const maxAge = 7 * 24 * 60 * 60 * 1000;
 			if (Date.now() - cacheData.timestamp > maxAge) {
-				console.log(`⚠️ Cache expired`);
 				localStorage.removeItem(`atlas_${cacheKey}`);
 				return null;
 			}
 
-			// Reconstruct atlas canvas from cached image data
+			// Load via Image (slower path)
 			const canvas = document.createElement('canvas');
 			canvas.width = this.atlasSize;
 			canvas.height = this.atlasSize;
@@ -105,30 +231,46 @@ export class AtlasBuilder {
 
 			ctx.drawImage(img, 0, 0);
 
-			// Reconstruct UV map
 			const uvMap = new Map<string, { u: number; v: number; width: number; height: number }>();
 			Object.entries(cacheData.uvMap).forEach(([path, uv]) => {
 				uvMap.set(path, uv);
 			});
 
-			console.log(`📊 Cache hit: ${uvMap.size} textures, ${cacheData.packingEfficiency.toFixed(1)}% efficiency`);
+			console.log(`📊 localStorage cache hit (legacy): ${uvMap.size} textures`);
 
 			return {
 				atlas: canvas,
 				uvMap,
-				packingEfficiency: cacheData.packingEfficiency
+				packingEfficiency: cacheData.packingEfficiency,
+				textureCount: cacheData.textureCount
 			};
 
 		} catch (error) {
-			console.warn(`⚠️ Failed to load from cache:`, error);
-			// Clean up corrupted cache
 			localStorage.removeItem(`atlas_${cacheKey}`);
 			return null;
 		}
 	}
 
 	/**
-	 * Save atlas to cache
+	 * Migrate legacy localStorage cache to IndexedDB
+	 */
+	private async migrateToIndexedDB(
+		cacheKey: string,
+		result: {
+			atlas: HTMLCanvasElement;
+			uvMap: Map<string, { u: number; v: number; width: number; height: number }>;
+			packingEfficiency: number;
+			textureCount: number;
+		}
+	): Promise<void> {
+		await this.saveToCache(cacheKey, result, result.textureCount);
+		// Remove legacy cache after successful migration
+		localStorage.removeItem(`atlas_${cacheKey}`);
+		console.log(`🔄 Migrated atlas cache to IndexedDB`);
+	}
+
+	/**
+	 * Save atlas to IndexedDB cache (fast)
 	 */
 	private async saveToCache(
 		cacheKey: string,
@@ -140,8 +282,8 @@ export class AtlasBuilder {
 		textureCount: number
 	): Promise<void> {
 		try {
-			// Convert canvas to base64
-			const atlasImageData = result.atlas.toDataURL('image/png');
+			const ctx = result.atlas.getContext('2d')!;
+			const imageData = ctx.getImageData(0, 0, result.atlas.width, result.atlas.height);
 
 			// Convert map to plain object
 			const uvMapObject: Record<string, { u: number; v: number; width: number; height: number }> = {};
@@ -149,37 +291,59 @@ export class AtlasBuilder {
 				uvMapObject[key] = value;
 			});
 
-			const cacheData: AtlasCache = {
-				atlasImageData,
+			const cacheData: AtlasCacheData = {
+				cacheKey,
+				imageData: imageData.data,
+				width: result.atlas.width,
+				height: result.atlas.height,
 				uvMap: uvMapObject,
 				packingEfficiency: result.packingEfficiency,
 				timestamp: Date.now(),
-				resourcePackHash: cacheKey,
 				textureCount
 			};
 
-			// Check storage size before saving
-			const dataSize = JSON.stringify(cacheData).length;
-			const maxSize = 5 * 1024 * 1024; // 5MB limit for localStorage
-			
-			if (dataSize > maxSize) {
-				console.warn(`⚠️ Atlas cache too large (${(dataSize / 1024 / 1024).toFixed(1)}MB), skipping cache`);
-				return;
-			}
+			const db = await openAtlasCacheDb();
+			await new Promise<void>((resolve, reject) => {
+				const transaction = db.transaction(ATLAS_CACHE_STORE_NAME, 'readwrite');
+				const store = transaction.objectStore(ATLAS_CACHE_STORE_NAME);
+				const request = store.put(cacheData);
+				
+				request.onsuccess = () => resolve();
+				request.onerror = () => reject(request.error);
+			});
 
-			localStorage.setItem(`atlas_${cacheKey}`, JSON.stringify(cacheData));
-			console.log(`💾 Cached atlas: ${(dataSize / 1024).toFixed(1)}KB`);
+			const sizeEstimate = imageData.data.length + JSON.stringify(uvMapObject).length;
+			console.log(`💾 Cached atlas to IndexedDB: ~${(sizeEstimate / 1024 / 1024).toFixed(1)}MB`);
 
 		} catch (error) {
-			console.warn(`⚠️ Failed to save to cache:`, error);
+			console.warn(`⚠️ Failed to save to IndexedDB cache:`, error);
+		}
+	}
+
+	/**
+	 * Delete from IndexedDB cache
+	 */
+	private async deleteFromCache(cacheKey: string): Promise<void> {
+		try {
+			const db = await openAtlasCacheDb();
+			await new Promise<void>((resolve) => {
+				const transaction = db.transaction(ATLAS_CACHE_STORE_NAME, 'readwrite');
+				const store = transaction.objectStore(ATLAS_CACHE_STORE_NAME);
+				store.delete(cacheKey);
+				transaction.oncomplete = () => resolve();
+				transaction.onerror = () => resolve();
+			});
+		} catch {
+			// Ignore errors
 		}
 	}
 
 	/**
 	 * Build a new atlas (original logic)
+	 * Supports both HTMLImageElement and ImageBitmap for flexibility
 	 */
 	private async buildNewAtlas(
-		textures: { path: string; image: HTMLImageElement }[]
+		textures: { path: string; image: HTMLImageElement | ImageBitmap }[]
 	): Promise<{
 		atlas: HTMLCanvasElement;
 		uvMap: Map<string, { u: number; v: number; width: number; height: number }>;
@@ -188,7 +352,7 @@ export class AtlasBuilder {
 		// Prepare texture info with dimensions
 		const textureInfos: TextureInfo[] = textures.map(({ path, image }) => ({
 			path,
-			image,
+			image: image as HTMLImageElement, // Cast for compatibility with existing types
 			width: image.width,
 			height: image.height,
 			area: image.width * image.height
@@ -225,47 +389,98 @@ export class AtlasBuilder {
 	}
 
 	/**
-	 * Clear all atlas caches
+	 * Clear all atlas caches (both IndexedDB and localStorage)
 	 */
-	public static clearAllCaches(): void {
+	public static async clearAllCaches(): Promise<void> {
+		// Clear IndexedDB
+		try {
+			const db = await openAtlasCacheDb();
+			await new Promise<void>((resolve) => {
+				const transaction = db.transaction(ATLAS_CACHE_STORE_NAME, 'readwrite');
+				const store = transaction.objectStore(ATLAS_CACHE_STORE_NAME);
+				store.clear();
+				transaction.oncomplete = () => resolve();
+				transaction.onerror = () => resolve();
+			});
+			console.log(`🗑️ Cleared IndexedDB atlas cache`);
+		} catch (error) {
+			console.warn(`⚠️ Failed to clear IndexedDB cache:`, error);
+		}
+
+		// Also clear legacy localStorage
 		const keys = Object.keys(localStorage);
 		const atlasKeys = keys.filter(key => key.startsWith('atlas_'));
-		
 		atlasKeys.forEach(key => {
 			localStorage.removeItem(key);
 		});
 		
-		console.log(`🗑️ Cleared ${atlasKeys.length} atlas caches`);
+		if (atlasKeys.length > 0) {
+			console.log(`🗑️ Cleared ${atlasKeys.length} legacy localStorage caches`);
+		}
 	}
 
 	/**
 	 * Get cache info for debugging
 	 */
-	public static getCacheInfo(): { key: string; size: string; age: string; textureCount: number }[] {
+	public static async getCacheInfo(): Promise<{ key: string; size: string; age: string; textureCount: number; storage: string }[]> {
+		const results: { key: string; size: string; age: string; textureCount: number; storage: string }[] = [];
+
+		// Get IndexedDB entries
+		try {
+			const db = await openAtlasCacheDb();
+			const entries = await new Promise<AtlasCacheData[]>((resolve) => {
+				const transaction = db.transaction(ATLAS_CACHE_STORE_NAME, 'readonly');
+				const store = transaction.objectStore(ATLAS_CACHE_STORE_NAME);
+				const request = store.getAll();
+				
+				request.onsuccess = () => resolve(request.result || []);
+				request.onerror = () => resolve([]);
+			});
+
+			for (const entry of entries) {
+				const size = entry.imageData.length + JSON.stringify(entry.uvMap).length;
+				const age = Math.round((Date.now() - entry.timestamp) / (1000 * 60 * 60));
+				results.push({
+					key: entry.cacheKey,
+					size: `${(size / 1024 / 1024).toFixed(1)}MB`,
+					age: `${age}h`,
+					textureCount: entry.textureCount,
+					storage: 'IndexedDB'
+				});
+			}
+		} catch {
+			// Ignore IndexedDB errors
+		}
+
+		// Also check legacy localStorage
 		const keys = Object.keys(localStorage);
 		const atlasKeys = keys.filter(key => key.startsWith('atlas_'));
 		
-		return atlasKeys.map(key => {
+		for (const key of atlasKeys) {
 			try {
 				const data = JSON.parse(localStorage.getItem(key) || '{}');
 				const size = localStorage.getItem(key)?.length || 0;
-				const age = Math.round((Date.now() - (data.timestamp || 0)) / (1000 * 60 * 60)); // hours
+				const age = Math.round((Date.now() - (data.timestamp || 0)) / (1000 * 60 * 60));
 				
-				return {
+				results.push({
 					key: key.replace('atlas_', ''),
 					size: `${(size / 1024).toFixed(1)}KB`,
 					age: `${age}h`,
-					textureCount: data.textureCount || 0
-				};
+					textureCount: data.textureCount || 0,
+					storage: 'localStorage (legacy)'
+				});
 			} catch {
-				return {
+				results.push({
 					key: key.replace('atlas_', ''),
 					size: 'corrupted',
 					age: 'unknown',
-					textureCount: 0
-				};
+					textureCount: 0,
+					storage: 'localStorage (legacy)'
+				});
 			}
-		});
+		}
+
+		return results;
 	}
 
 	// Rest of the original methods remain the same...
