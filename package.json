@@ -1,6 +1,6 @@
 {
 	"name": "cubane",
-	"version": "1.0.17",
+	"version": "1.0.18",
 	"description": "A Three.js-based Minecraft block and entity renderer with resource pack support",
 	"type": "module",
 	"main": "dist/cubane.umd.js",
@@ -22,9 +22,10 @@
 		"dev": "vite",
 		"build": "tsc --project tsconfig.build.json && vite build && npm run build:types",
 		"build:types": "tsc --project tsconfig.build.json --emitDeclarationOnly",
-		"prepare": "npm run build",
-		"prepublishOnly": "npm run build",
 		"preview": "vite preview"
+	},
+	"publishConfig": {
+		"access": "public"
 	},
 	"keywords": [
 		"minecraft",
