@@ -12,6 +12,11 @@ import {
 	PackEventMap,
 	PackEventCallback,
 } from "./types";
+import {
+	formatPackAssetReference,
+	packAssetFromFilePath,
+	packPathForAsset,
+} from "./ResourceLocation";
 
 interface LoadedPack {
 	info: ResourcePackInfo;
@@ -625,13 +630,16 @@ export class ResourcePackManager {
 		
 		for (const file of files) {
 			if (pack.zip.files[file].dir) continue;
+			const asset = packAssetFromFilePath(file);
 
-			if (file.includes('assets/minecraft/textures/') && file.endsWith('.png')) {
-				textures.push(file.replace('assets/minecraft/textures/', '').replace('.png', ''));
-			} else if (file.includes('assets/minecraft/blockstates/') && file.endsWith('.json')) {
-				blockstates.push(file.replace('assets/minecraft/blockstates/', '').replace('.json', ''));
-			} else if (file.includes('assets/minecraft/models/') && file.endsWith('.json')) {
-				models.push(file.replace('assets/minecraft/models/', '').replace('.json', ''));
+			if (!asset) continue;
+
+			if (asset.type === 'texture') {
+				textures.push(formatPackAssetReference(asset));
+			} else if (asset.type === 'blockstate') {
+				blockstates.push(formatPackAssetReference(asset));
+			} else if (asset.type === 'model') {
+				models.push(formatPackAssetReference(asset));
 			}
 		}
 
@@ -642,14 +650,7 @@ export class ResourcePackManager {
 	 * Get which pack provides a specific asset
 	 */
 	public getAssetSource(assetPath: string, type: 'texture' | 'blockstate' | 'model'): string | null {
-		const prefix = {
-			texture: 'assets/minecraft/textures/',
-			blockstate: 'assets/minecraft/blockstates/',
-			model: 'assets/minecraft/models/',
-		}[type];
-
-		const suffix = type === 'texture' ? '.png' : '.json';
-		const fullPath = prefix + assetPath + suffix;
+		const fullPath = packPathForAsset(assetPath, type);
 
 		// Check packs in reverse priority order (highest first)
 		for (let i = this.packOrder.length - 1; i >= 0; i--) {
@@ -683,16 +684,13 @@ export class ResourcePackManager {
 
 				let assetKey: string | null = null;
 				let assetType: 'texture' | 'blockstate' | 'model' | null = null;
+				const asset = packAssetFromFilePath(file);
 
-				if (file.includes('assets/minecraft/textures/') && file.endsWith('.png')) {
-					assetKey = `texture:${file.replace('assets/minecraft/textures/', '').replace('.png', '')}`;
-					assetType = 'texture';
-				} else if (file.includes('assets/minecraft/blockstates/') && file.endsWith('.json')) {
-					assetKey = `blockstate:${file.replace('assets/minecraft/blockstates/', '').replace('.json', '')}`;
-					assetType = 'blockstate';
-				} else if (file.includes('assets/minecraft/models/') && file.endsWith('.json')) {
-					assetKey = `model:${file.replace('assets/minecraft/models/', '').replace('.json', '')}`;
-					assetType = 'model';
+				if (asset) {
+					assetType = asset.type;
+					assetKey = `${asset.type}:${formatPackAssetReference(asset, {
+						omitDefaultNamespace: false,
+					})}`;
 				}
 
 				if (assetKey) {
@@ -716,7 +714,9 @@ export class ResourcePackManager {
 				// Sort by priority (highest first)
 				providers.sort((a, b) => b.priority - a.priority);
 
-				const [type, assetPath] = assetKey.split(':');
+				const separatorIndex = assetKey.indexOf(':');
+				const type = assetKey.slice(0, separatorIndex);
+				const assetPath = assetKey.slice(separatorIndex + 1);
 				
 				conflicts.push({
 					assetPath,
@@ -737,7 +737,7 @@ export class ResourcePackManager {
 		const pack = this.packs.get(packId);
 		if (!pack) return null;
 
-		const fullPath = `assets/minecraft/textures/${texturePath}.png`;
+		const fullPath = packPathForAsset(texturePath, 'texture');
 		const file = pack.zip.file(fullPath);
 		if (!file) return null;
 
@@ -1073,12 +1073,15 @@ export class ResourcePackManager {
 			const files = Object.keys(zip.files);
 			for (const file of files) {
 				if (zip.files[file].dir) continue;
+				const asset = packAssetFromFilePath(file);
 
-				if (file.includes('assets/minecraft/textures/') && file.endsWith('.png')) {
+				if (!asset) continue;
+
+				if (asset.type === 'texture') {
 					result.assetCounts.textures++;
-				} else if (file.includes('assets/minecraft/blockstates/') && file.endsWith('.json')) {
+				} else if (asset.type === 'blockstate') {
 					result.assetCounts.blockstates++;
-				} else if (file.includes('assets/minecraft/models/') && file.endsWith('.json')) {
+				} else if (asset.type === 'model') {
 					result.assetCounts.models++;
 				}
 			}
@@ -1089,7 +1092,7 @@ export class ResourcePackManager {
 				result.assetCounts.models > 0;
 
 			if (!hasAssets) {
-				result.errors.push('No Minecraft assets found in pack');
+				result.errors.push('No valid resource pack assets found in pack');
 			} else {
 				result.valid = true;
 			}
@@ -1230,12 +1233,15 @@ export class ResourcePackManager {
 
 		for (const file of files) {
 			if (zip.files[file].dir) continue;
+			const asset = packAssetFromFilePath(file);
 
-			if (file.includes('assets/minecraft/textures/') && file.endsWith('.png')) {
+			if (!asset) continue;
+
+			if (asset.type === 'texture') {
 				assetCounts.textures++;
-			} else if (file.includes('assets/minecraft/blockstates/') && file.endsWith('.json')) {
+			} else if (asset.type === 'blockstate') {
 				assetCounts.blockstates++;
-			} else if (file.includes('assets/minecraft/models/') && file.endsWith('.json')) {
+			} else if (asset.type === 'model') {
 				assetCounts.models++;
 			}
 		}
